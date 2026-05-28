@@ -1,0 +1,7 @@
+langchain-core
+langchain-ollama
+langchain-text-splitters
+langchain-community
+chromadb
+pdfplumber
+ollama
