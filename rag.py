@@ -30,26 +30,15 @@ PROCESSED_FILES_LOG = "/Users/aparajithguha/Workspace/apara_space/processed_file
 CHROMA_PERSIST_DIRECTORY = "/Users/aparajithguha/Workspace/apara_space/chroma_db"
 BATCH_SIZE = 200
 RETRIEVAL_K = 8
-RETRIEVAL_FETCH_K = 12
-KEYWORD_FALLBACK_K = 3
+RETRIEVAL_FETCH_K = 20
+KEYWORD_FALLBACK_K = 5
 USE_RERANKING = False
 RERANK_TOP_K = 5
 RERANK_PREVIEW_CHARS = 500
-MAX_CONTEXT_DOCS = 5
-MAX_CONTEXT_CHARS_PER_DOC = 900
+MAX_CONTEXT_DOCS = 6
+MAX_CONTEXT_CHARS_PER_DOC = 1200
 model = "gemma4:e2b"
 embedding_model = "nomic-embed-text"
-QUERY_EXPANSIONS = {
-    "rag": [
-        "retrieval augmented generation",
-        "retrieval-augmented generation",
-        "rag system",
-    ],
-    "llm": [
-        "large language model",
-        "large language models",
-    ],
-}
 
 # Create folders
 os.makedirs(RAG_DOCUMENTS_FOLDER, exist_ok=True)
@@ -196,7 +185,6 @@ llm = ChatOllama(model=model)
 print("✓\n")
 
 keyword_cache = None
-last_selected_docs = []
 
 # ============================================================================
 # RAG Functions
@@ -241,29 +229,22 @@ def tokenize_text(text: str) -> list:
     return re.findall(r"\b[a-zA-Z0-9]{3,}\b", text.lower())
 
 def build_query_variants(question: str) -> list:
-    """Generate a small set of normalized query variants."""
+    """Generate a few normalized query variants for more robust retrieval."""
     variants = [question.strip()]
     normalized = " ".join(tokenize_text(question))
     if normalized and normalized not in variants:
         variants.append(normalized)
 
-    normalized_tokens = tokenize_text(question)
-    for token in normalized_tokens:
-        for expansion in QUERY_EXPANSIONS.get(token, []):
-            expanded_question = re.sub(
-                rf"\b{re.escape(token)}\b",
-                expansion,
-                question,
-                flags=re.IGNORECASE,
-            ).strip()
-            if expanded_question and expanded_question not in variants:
-                variants.append(expanded_question)
+    compact = re.sub(r"[^a-zA-Z0-9\s-]", " ", question.lower())
+    compact = re.sub(r"\s+", " ", compact).strip()
+    if compact and compact not in variants:
+        variants.append(compact)
 
-    if "rag" in normalized_tokens:
-        rag_definition_query = "what is retrieval augmented generation"
-        if rag_definition_query not in variants:
-            variants.append(rag_definition_query)
-    return variants[:5]
+    no_hyphen = compact.replace("-", " ")
+    if no_hyphen and no_hyphen not in variants:
+        variants.append(no_hyphen)
+
+    return variants[:4]
 
 def load_keyword_cache() -> list:
     """Load stored chunks from Chroma for keyword fallback retrieval."""
@@ -337,48 +318,28 @@ def combine_documents(primary_docs: list, fallback_docs: list) -> list:
 
     return combined_docs
 
-def score_document_for_question(doc: Document, question: str) -> int:
-    """Score a document using lightweight lexical matching against query variants."""
-    query_variants = build_query_variants(question)
-    query_tokens = set()
-    for variant in query_variants:
-        query_tokens.update(tokenize_text(variant))
-
-    document_text = doc.page_content.lower()
-    document_tokens = set(tokenize_text(doc.page_content))
-    overlap_score = len(query_tokens & document_tokens)
-
-    phrase_score = 0
-    for variant in query_variants:
-        normalized_variant = variant.lower().strip()
-        if normalized_variant and normalized_variant in document_text:
-            phrase_score += 3
-
-    return overlap_score + phrase_score
-
 def semantic_search(question: str) -> list:
-    """Run semantic retrieval across a small set of query variants and merge."""
+    """Run semantic retrieval across a few query variants and merge results."""
     query_variants = build_query_variants(question)
-    base_retriever = vector_db.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": RETRIEVAL_K, "fetch_k": RETRIEVAL_FETCH_K},
-    )
     all_docs = []
 
     for variant in query_variants:
         print(f"  Semantic search variant: {variant}", flush=True)
+        base_retriever = vector_db.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": RETRIEVAL_K, "fetch_k": RETRIEVAL_FETCH_K},
+        )
         docs = base_retriever.invoke(variant)
         all_docs.extend(docs)
 
     return combine_documents(all_docs, [])
 
 def limit_context_documents(documents: list, max_docs: int = MAX_CONTEXT_DOCS) -> list:
-    """Keep the highest-scoring documents for final context assembly."""
+    """Keep a bounded number of documents for final context assembly."""
     return documents[:max_docs]
 
 def retrieve_and_rerank(question: str) -> str:
     """Retrieve and rerank documents for better relevance."""
-    global last_selected_docs
     print("  Searching vector database for similar chunks...", flush=True)
     docs = semantic_search(question)
     print(f"  ✓ Retrieved {len(docs)} candidate chunks", flush=True)
@@ -389,14 +350,9 @@ def retrieve_and_rerank(question: str) -> str:
     if USE_RERANKING:
         selected_docs = rerank_documents(question, combined_docs, top_k=RERANK_TOP_K)
     else:
-        print("  Scoring combined chunks and using the strongest matches directly...", flush=True)
-        selected_docs = sorted(
-            combined_docs,
-            key=lambda doc: score_document_for_question(doc, question),
-            reverse=True,
-        )
+        print("  Skipping reranking and using combined chunks directly...", flush=True)
+        selected_docs = combined_docs
     selected_docs = limit_context_documents(selected_docs)
-    last_selected_docs = selected_docs
     print(f"  ✓ Using {len(selected_docs)} chunks in final context", flush=True)
     
     print("  Building context from top-ranked chunks...", flush=True)
@@ -415,7 +371,7 @@ def retrieve_and_rerank(question: str) -> str:
 def query_rag(question: str):
     """Query the RAG system."""
     rag_response_prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant that answers questions based on the provided context. Treat acronyms and full forms as equivalent, for example RAG means Retrieval-Augmented Generation. Prefer answering from the context even if the wording differs from the question. Synthesize across multiple excerpts when needed. Only say the context does not contain the answer when the retrieved context is clearly unrelated. When possible, mention the source file names you relied on."),
+        ("system", "You are a helpful assistant that answers questions based on the provided context. Prefer answering from the context even if the wording differs from the question. Synthesize across multiple excerpts when needed. Only say the context does not contain the answer when the retrieved context is clearly unrelated. When possible, mention the source file names you relied on."),
         ("human", "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"),
     ])
     
@@ -433,22 +389,6 @@ def query_rag(question: str):
     answer = rag_chain.invoke({"question": question})
     print("  ✓ Answer generated", flush=True)
     return answer
-
-def print_last_retrieved_chunks():
-    """Print the chunks that were most recently used to answer a question."""
-    if not last_selected_docs:
-        print("\nNo retrieved chunks available yet. Ask a question first.\n")
-        return
-
-    print("\n" + "=" * 80)
-    print("LAST RETRIEVED CHUNKS")
-    print("=" * 80)
-    for index, doc in enumerate(last_selected_docs, 1):
-        source_file = doc.metadata.get("source_file", "Unknown")
-        page = doc.metadata.get("page", "Unknown")
-        preview = doc.page_content[:500].replace("\n", " ")
-        print(f"{index}. {source_file} | page {page}")
-        print(f"   {preview}\n")
 
 # ============================================================================
 # Interactive Mode
@@ -476,7 +416,6 @@ def main():
     print("  - Type 'quit' or 'exit' to exit")
     print("  - Type 'info' to see stats")
     print("  - Type 'help' for more info")
-    print("  - Type 'debug' to inspect the last retrieved chunks")
     print("="*80 + "\n")
     
     while True:
@@ -503,10 +442,6 @@ def main():
                 print("\nTo add documents:")
                 print(f"  1. Copy PDF files to: {RAG_DOCUMENTS_FOLDER}")
                 print("  2. Restart this script (it auto-detects new files)\n")
-                continue
-
-            if question.lower() == 'debug':
-                print_last_retrieved_chunks()
                 continue
             
             # Query the RAG system
