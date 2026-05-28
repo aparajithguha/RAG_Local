@@ -14,6 +14,38 @@ A local Retrieval-Augmented Generation (RAG) script that reads your PDF document
 - Stores embeddings in a local Chroma vector store
 - Retrieves relevant context and answers questions with Ollama
 
+## Architecture
+
+```mermaid
+flowchart TD
+    A[PDF Files in RAG_documents] --> B[pdfplumber Text Extraction]
+    B --> C[RecursiveCharacterTextSplitter]
+    C --> D[Ollama Embeddings<br/>nomic-embed-text]
+    D --> E[Chroma Vector Store<br/>local persisted database]
+
+    U[User Question] --> Q[Query Expansion<br/>and Normalization]
+    Q --> S[Semantic Search<br/>MMR Retrieval]
+    Q --> K[Keyword Fallback Search]
+    E --> S
+    E --> K
+
+    S --> M[Merge and Deduplicate Chunks]
+    K --> M
+    M --> L[Limit Final Context]
+    L --> O[Ollama Chat Model<br/>gemma4:e2b]
+    O --> R[Answer with Source Context]
+```
+
+## Request Flow
+
+1. New PDFs are read from `RAG_documents/`.
+2. Text is extracted and split into chunks.
+3. Chunks are embedded with Ollama and stored in Chroma.
+4. A user question is expanded into search-friendly variants.
+5. The system retrieves relevant chunks using semantic search plus keyword fallback.
+6. The best chunks are merged into a final context.
+7. Ollama generates the answer from that context.
+
 ## Requirements
 
 - Python 3
